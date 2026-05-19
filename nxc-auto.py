@@ -1,104 +1,83 @@
-import subprocess
-import argparse
-import concurrent.futures
+#!/usr/bin/env python3
 import sys
 import os
-import ipaddress
+import subprocess
 
-def parse_targets(target_input):
-    """
-    Parses a single IP, a CIDR subnet, a hostname, or a file.
-    Returns a list of target strings.
-    """
-    targets = []
-    
-    if os.path.isfile(target_input):
-        with open(target_input, 'r') as f:
+# ANSI Escape Codes for Terminal Colors
+GREEN = "\033[92m"
+BLUE = "\033[94m"
+YELLOW = "\033[93m"
+RED = "\033[91m"
+CYAN = "\033[96m"
+BOLD = "\033[1m"
+RESET = "\033[0m"
+
+def run_nxc_blast(targets_file, creds_file, protocols):
+    # Validate that files exist
+    if not os.path.exists(targets_file):
+        print(f"{RED}[-]{RESET} Error: Targets file '{targets_file}' not found.")
+        return
+    if not os.path.exists(creds_file):
+        print(f"{RED}[-]{RESET} Error: Credentials file '{creds_file}' not found.")
+        return
+
+    print(f"{BOLD}{CYAN}[*] Starting Python NXC Automator...{RESET}")
+    print(f"{CYAN}--------------------------------------------------{RESET}")
+
+    # Loop through each protocol specified
+    for proto in protocols:
+        proto = proto.strip().lower()
+        print(f"\n{BOLD}{BLUE}[+] Testing Protocol: {proto.upper()}{RESET}")
+        print(f"{BLUE}--------------------------------------------------{RESET}")
+
+        # Open and read the credentials file
+        with open(creds_file, 'r') as f:
             for line in f:
-                clean_line = line.strip()
-                if clean_line:
-                    targets.append(clean_line)
-        return targets
+                line = line.strip()
+                
+                # Skip empty lines or comments
+                if not line or line.startswith('#'):
+                    continue
 
-    try:
-        net = ipaddress.ip_network(target_input, strict=False)
-        
-        if net.num_addresses == 1:
-            targets.append(str(net.network_address))
-        else:
-            for ip in net.hosts():
-                targets.append(str(ip))
-        return targets
-        
-    except ValueError:
-        targets.append(target_input)
-        return targets
+                # Split the line by whitespace into username and password
+                parts = line.split(maxsplit=1)
+                if len(parts) < 2:
+                    print(f"{YELLOW}[!]{RESET} Skipping invalid credential line: '{line}'")
+                    continue
 
-def run_nxc(target, protocol, user_arg, pass_arg, use_kerberos=False):
-    """
-    Executes the NXC command for a single target.
-    """
-    command = ["nxc", protocol, target, "-u", user_arg, "-p", pass_arg]
-    
-    auth_type = "NTLM"
-    if use_kerberos:
-        command.append("-k")
-        auth_type = "KERBEROS"
+                username, password = parts[0], parts[1]
+                print(f"{YELLOW}[~] Testing:{RESET} {BOLD}{username}{RESET} : {BOLD}{password}{RESET}")
 
-    try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=60)
-        return target, protocol, auth_type, result.stdout
-        
-    except subprocess.TimeoutExpired:
-        return target, protocol, auth_type, "[!] Scan timeout."
-    except Exception as e:
-        return target, protocol, auth_type, f"[!] Error: {e}"
+                # Construct the NetExec command
+                cmd = [
+                    "nxc", proto, targets_file,
+                    "-u", username,
+                    "-p", password,
+                    "--continue-on-success"
+                ]
 
-def main():
-    parser = argparse.ArgumentParser(description="Automated NXC (NetExec) Wrapper")
-    parser.add_argument("-t", "--target", required=True, help="Target IP, CIDR (e.g., 10.0.0.0/24), hostname, or file")
-    parser.add_argument("-u", "--user", required=True, help="Username or users file")
-    parser.add_argument("-p", "--password", required=True, help="Password or passwords file")
-    parser.add_argument("--protocols", nargs='+', default=["smb"], help="List of protocols (e.g., smb ssh winrm)")
-    parser.add_argument("--threads", type=int, default=10, help="Number of concurrent threads")
-    parser.add_argument("-k", "--kerberos", action="store_true", help="Use Kerberos authentication (-k)")
-    parser.add_argument("-a", "--auto-auth", action="store_true", help="Test both NTLM and Kerberos automatically")
-    
-    args = parser.parse_args()
-    target_list = parse_targets(args.target)
-    
-    if not target_list:
-        print("[-] No valid targets found. Exiting.")
-        sys.exit(1)
+                try:
+                    # Run the command and let it print directly to the terminal
+                    # NetExec inherently preserves its own colors when run this way
+                    subprocess.run(cmd, check=False)
+                except FileNotFoundError:
+                    print(f"{RED}[-]{RESET} Error: 'nxc' (NetExec) command not found.")
+                    sys.exit(1)
+                except KeyboardInterrupt:
+                    print(f"\n{YELLOW}[!]{RESET} Script terminated by user.")
+                    sys.exit(0)
 
-    print(f"[*] Loaded {len(target_list)} target(s).")
-
-    tasks = []
-    for target in target_list:
-        for proto in args.protocols:
-            if args.auto_auth:
-                tasks.append((target, proto, args.user, args.password, False)) # NTLM
-                tasks.append((target, proto, args.user, args.password, True))  # Kerberos
-            else:
-                tasks.append((target, proto, args.user, args.password, args.kerberos))
-
-    total_tasks = len(tasks)
-    print(f"[*] Starting scan | Threads: {args.threads} | Total Tasks: {total_tasks}")
-    print("-" * 50)
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=args.threads) as executor:
-        futures = {executor.submit(run_nxc, t[0], t[1], t[2], t[3], t[4]): t for t in tasks}
-        
-        for future in concurrent.futures.as_completed(futures):
-            target, protocol, auth_type, output = future.result()
-            
-            # Print logic: Only show blocks where we actually found something
-            interesting_lines = [line.strip() for line in output.split('\n') if "[+]" in line or "Pwn3d!" in line]
-            
-            if interesting_lines:
-                print(f"\n--- [ {target} | {protocol.upper()} | {auth_type} ] ---")
-                for line in interesting_lines:
-                    print(line)
+    print(f"\n{CYAN}--------------------------------------------------{RESET}")
+    print(f"{BOLD}{GREEN}[+] Automation complete!{RESET}")
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) != 4:
+        print(f"{BOLD}Usage:{RESET} python3 nxc_blast_color.py <targets.txt> <creds.txt> <protocols_comma_separated>")
+        print("Example: python3 nxc_blast_color.py targets.txt creds.txt smb,ssh")
+        sys.exit(1)
+
+    t_file = sys.argv[1]
+    c_file = sys.argv[2]
+    proto_list = sys.argv[3].split(",")
+
+    run_nxc_blast(t_file, c_file, proto_list)
