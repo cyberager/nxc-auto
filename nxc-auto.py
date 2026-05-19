@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 import sys
 import os
+import argparse
 import subprocess
 
-# ANSI Escape Codes for Terminal Colors
 GREEN = "\033[92m"
 BLUE = "\033[94m"
 YELLOW = "\033[93m"
@@ -12,72 +12,91 @@ CYAN = "\033[96m"
 BOLD = "\033[1m"
 RESET = "\033[0m"
 
-def run_nxc_blast(targets_file, creds_file, protocols):
-    # Validate that files exist
-    if not os.path.exists(targets_file):
-        print(f"{RED}[-]{RESET} Error: Targets file '{targets_file}' not found.")
-        return
-    if not os.path.exists(creds_file):
-        print(f"{RED}[-]{RESET} Error: Credentials file '{creds_file}' not found.")
-        return
+def main():
+    parser = argparse.ArgumentParser(
+        description="Advanced Colorized NetExec (NXC) Automation Wrapper for CTFs",
+        formatter_class=argparse.RawTextHelpFormatter
+    )
+    
+    parser.add_argument("-t", "--targets", required=True, help="Path to targets.txt (IPs, ranges, or domains)")
+    parser.add_argument("-c", "--creds", required=True, help="Path to creds.txt (Format: 'user pass' per line)")
+    parser.add_argument("-p", "--protocols", required=True, help="Comma-separated protocols (e.g., smb,ssh,ldap)")
+    parser.add_argument("--threads", type=int, default=10, help="Number of concurrent NXC threads (Default: 10)")
+    parser.add_argument("--jitter", type=str, help="Random delay interval between connections (e.g., '2-5' or '3')")
+    parser.add_argument("--timeout", type=int, help="Max timeout in seconds for each thread")
+    parser.add_argument("--port", type=int, help="Force a non-default custom port for the protocols")
+    parser.add_argument("-k", "--kerberos", action="store_true", help="Use Kerberos authentication instead of NTLM")
+    parser.add_argument("--kdc", help="KDC IP or Hostname (Required if using --kerberos)")
+    parser.add_argument("-d", "--domain", help="Domain name to append for authentication context")
+    args = parser.parse_args()
 
-    print(f"{BOLD}{CYAN}[*] Starting Python NXC Automator...{RESET}")
-    print(f"{CYAN}--------------------------------------------------{RESET}")
+    if not os.path.exists(args.targets):
+        print(f"{RED}[-]{RESET} Error: Targets file '{args.targets}' not found.")
+        sys.exit(1)
+    if not os.path.exists(args.creds):
+        print(f"{RED}[-]{RESET} Error: Credentials file '{args.creds}' not found.")
+        sys.exit(1)
 
-    # Loop through each protocol specified
-    for proto in protocols:
-        proto = proto.strip().lower()
-        print(f"\n{BOLD}{BLUE}[+] Testing Protocol: {proto.upper()}{RESET}")
-        print(f"{BLUE}--------------------------------------------------{RESET}")
+    protocols_list = [p.strip().lower() for p in args.protocols.split(",")]
 
-        # Open and read the credentials file
-        with open(creds_file, 'r') as f:
+    print(f"{BOLD}{CYAN}[*] Initializing Advanced NXC Automation Run...{RESET}")
+    print(f"{CYAN}------------------------------------------------------------{RESET}")
+
+    for proto in protocols_list:
+        print(f"\n{BOLD}{BLUE}[+] Activating Protocol: {proto.upper()}{RESET}")
+        print(f"{BLUE}------------------------------------------------------------{RESET}")
+
+        with open(args.creds, 'r') as f:
             for line in f:
                 line = line.strip()
-                
-                # Skip empty lines or comments
                 if not line or line.startswith('#'):
                     continue
 
-                # Split the line by whitespace into username and password
                 parts = line.split(maxsplit=1)
                 if len(parts) < 2:
                     print(f"{YELLOW}[!]{RESET} Skipping invalid credential line: '{line}'")
                     continue
 
                 username, password = parts[0], parts[1]
-                print(f"{YELLOW}[~] Testing:{RESET} {BOLD}{username}{RESET} : {BOLD}{password}{RESET}")
+                print(f"{YELLOW}[~] Queueing Base Auth:{RESET} {BOLD}{username}{RESET} : {BOLD}{password}{RESET}")
 
-                # Construct the NetExec command
-                cmd = [
-                    "nxc", proto, targets_file,
-                    "-u", username,
-                    "-p", password,
-                    "--continue-on-success"
-                ]
+                cmd = ["nxc", proto, args.targets, "-t", str(args.threads)]
+                
+                if args.jitter:
+                    cmd.extend(["--jitter", args.jitter])
+                if args.timeout:
+                    cmd.extend(["--timeout", str(args.timeout)])
+                
+                cmd.extend(["-u", username, "-p", password])
+                
+                if args.domain:
+                    cmd.extend(["-d", args.domain])
+
+                if args.port:
+                    cmd.extend(["--port", str(args.port)])
+                elif proto == "ldap" and args.port == 636:
+                    cmd.extend(["--simple-bind"])
+
+                if args.kerberos:
+                    cmd.append("-k")
+                    if args.kdc:
+                        cmd.extend(["--kdcHost", args.kdc])
+                    else:
+                        print(f"{RED}[-]{RESET} Warning: Kerberos enabled (-k) but --kdc host wasn't provided.")
+
+                cmd.append("--continue-on-success")
 
                 try:
-                    # Run the command and let it print directly to the terminal
-                    # NetExec inherently preserves its own colors when run this way
                     subprocess.run(cmd, check=False)
                 except FileNotFoundError:
-                    print(f"{RED}[-]{RESET} Error: 'nxc' (NetExec) command not found.")
+                    print(f"{RED}[-]{RESET} Critical Error: 'nxc' command execution failed. Ensure NetExec is installed.")
                     sys.exit(1)
                 except KeyboardInterrupt:
-                    print(f"\n{YELLOW}[!]{RESET} Script terminated by user.")
+                    print(f"\n{RED}[!] Operational run paused by user interrupt.{RESET}")
                     sys.exit(0)
 
-    print(f"\n{CYAN}--------------------------------------------------{RESET}")
-    print(f"{BOLD}{GREEN}[+] Automation complete!{RESET}")
+    print(f"\n{CYAN}------------------------------------------------------------{RESET}")
+    print(f"{BOLD}{GREEN}[+] Finished checking all specified matrices!{RESET}")
 
 if __name__ == "__main__":
-    if len(sys.argv) != 4:
-        print(f"{BOLD}Usage:{RESET} python3 nxc_blast_color.py <targets.txt> <creds.txt> <protocols_comma_separated>")
-        print("Example: python3 nxc_blast_color.py targets.txt creds.txt smb,ssh")
-        sys.exit(1)
-
-    t_file = sys.argv[1]
-    c_file = sys.argv[2]
-    proto_list = sys.argv[3].split(",")
-
-    run_nxc_blast(t_file, c_file, proto_list)
+    main()
